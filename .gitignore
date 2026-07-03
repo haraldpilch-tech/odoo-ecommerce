@@ -1,0 +1,5 @@
+.env
+.env.template
+venv/
+.DS_Store
+venv
