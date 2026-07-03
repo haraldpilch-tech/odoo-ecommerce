@@ -100,22 +100,32 @@ def main():
         print("Error: Excel sheet is empty.")
         sys.exit(1)
 
-    # Strip spaces from headers for robust matching
-    header_row = rows[0]
+    # Auto-detect headers row by scanning the first 10 rows for a SKU synonym
+    header_row_idx = 0
+    sku_syns = ["sku", "item no", "item_no", "article", "product code", "reference"]
+    for r_idx, row in enumerate(rows[:10]):
+        row_vals_lower = [str(cell).lower().strip() if cell is not None else "" for cell in row]
+        if any(syn in row_vals_lower for syn in sku_syns):
+            header_row_idx = r_idx
+            print(f"Auto-detected headers row at index {header_row_idx} (Row {header_row_idx + 1})")
+            break
+
+    header_row = rows[header_row_idx]
     headers = [str(h).strip() if h is not None else "" for h in header_row]
-    print("Found headers:", headers)
+    print("Found headers (showing first 15):", headers[:15])
 
     # Map headers to indices using synonyms
     synonyms = {
-        "sku": ["item no", "item_no", "article", "sku", "product code", "reference"],
-        "name": ["name", "product name", "product_name"],
-        "description": ["description", "sales description", "sales_description"],
+        "sku": ["sku", "item no", "item_no", "article", "product code", "reference"],
+        "name": ["title", "name", "product name", "product_name", "artikelname", "artikel-name", "item name", "item_name"],
+        "description": ["beschreibung des produkts", "produktbeschreibung", "description", "sales description", "sales_description"],
         "reseller_price": ["reseller price", "reseller_price", "price eur", "price_eur", "price", "wholesale price", "wholesale_price", "cost"],
-        "rrp": ["rrp", "rrp eur", "rrp_eur", "rrp price", "sales price", "sales_price", "retail price", "retail_price"],
-        "barcode": ["ean", "barcode", "upc"],
-        "hs_code": ["hs code", "hs_code", "tariff code", "tariff_code"],
+        "rrp": ["listenpreis (uvp)", "listenpreis mit steuern", "rrp", "rrp eur", "rrp_eur", "rrp price", "sales price", "sales_price", "retail price", "retail_price"],
+        "barcode": ["ean", "barcode", "upc", "produkt-id", "produkt_id", "product id", "product_id"],
+        "barcode_type": ["art der produkt-id", "art_der_produkt_id", "product id type", "product_id_type", "product-id-type"],
+        "hs_code": ["hs code", "hs_code", "zolltarifnummer", "tariff code", "tariff_code"],
         "masterbox": ["masterbox", "master box", "package qty"],
-        "weight": ["nw", "net weight", "net_weight", "weight"]
+        "weight": ["nw", "net weight", "net_weight", "weight", "gewicht des pakets", "artikelanzeige-gewicht"]
     }
 
     indices = {key: -1 for key in synonyms.keys()}
@@ -127,19 +137,10 @@ def main():
                 indices[key] = headers_lower.index(syn)
                 break
 
-    # Fallback: if 'name' is not found, use 'description' as product name
-    if indices["name"] == -1 and indices["description"] != -1:
-        print("Name column not found. Using 'Description' column as product Name.")
-        indices["name"] = indices["description"]
-
-    # Validate required columns
+    # Validate required SKU column
     if indices["sku"] == -1:
         print("Error: Could not find SKU / Article column in the Excel headers.")
-        print(f"Excel headers: {headers}")
-        sys.exit(1)
-    if indices["name"] == -1:
-        print("Error: Could not find Name / Description column in the Excel headers.")
-        print(f"Excel headers: {headers}")
+        print(f"Excel headers (showing first 15): {headers[:15]}")
         sys.exit(1)
 
     # Keep track of statistics
@@ -149,25 +150,12 @@ def main():
     failed_count = 0
 
     print("\nStarting product synchronization...")
-    for row_idx, row in enumerate(rows[1:], start=2):
+    for row_idx, row in enumerate(rows[header_row_idx + 1:], start=header_row_idx + 2):
         # Skip completely empty rows
         if all(val is None for val in row):
             continue
 
         item_no = row[indices["sku"]] if indices["sku"] != -1 else None
-        name_val = row[indices["name"]] if indices["name"] != -1 else None
-        
-        # Only use description column for description_sale if it was not already consumed for the product name
-        description_val = None
-        if indices["description"] != -1 and indices["description"] != indices["name"]:
-            description_val = row[indices["description"]]
-
-        reseller_price = row[indices["reseller_price"]] if indices["reseller_price"] != -1 else None
-        rrp = row[indices["rrp"]] if indices["rrp"] != -1 else None
-        ean = row[indices["barcode"]] if indices["barcode"] != -1 else None
-        hs_code = row[indices["hs_code"]] if indices["hs_code"] != -1 else None
-        masterbox = row[indices["masterbox"]] if indices["masterbox"] != -1 else None
-        weight_val = row[indices["weight"]] if indices["weight"] != -1 else None
 
         # Validate SKU
         if item_no is None:
@@ -179,47 +167,101 @@ def main():
         if sku.endswith(".0"):
             sku = sku[:-2]  # Remove trailing float representation
 
+        # Bypass sample row from Amazon templates
+        if sku.upper() == "ABC123":
+            continue
+
+        # Dynamic name resolution per-row (chooses first non-empty synonym value)
+        name_val = None
+        name_col_idx = -1
+        for syn_key in synonyms["name"]:
+            if syn_key in headers_lower:
+                col_idx = headers_lower.index(syn_key)
+                val = row[col_idx]
+                if val is not None and str(val).strip() != "":
+                    name_val = str(val).strip()
+                    name_col_idx = col_idx
+                    break
+
         if not name_val:
             print(f"Row {row_idx} (SKU {sku}): Skipped due to missing Product Name.")
             failed_count += 1
             continue
 
-        name = str(name_val).strip()
-        description = str(description_val).strip() if description_val else ""
+        # Dynamic description resolution per-row (excluding the column chosen for name)
+        description_val = None
+        for syn_key in synonyms["description"]:
+            if syn_key in headers_lower:
+                col_idx = headers_lower.index(syn_key)
+                if col_idx != name_col_idx:
+                    val = row[col_idx]
+                    if val is not None and str(val).strip() != "":
+                        description_val = str(val).strip()
+                        break
 
-        # Parse prices safely
-        try:
-            cost_price = float(reseller_price) if reseller_price is not None else 0.0
-        except ValueError:
-            print(f"Row {row_idx} (SKU {sku}): Invalid Cost Price '{reseller_price}', defaulting to 0.0")
-            cost_price = 0.0
+        reseller_price = row[indices["reseller_price"]] if indices["reseller_price"] != -1 else None
+        rrp = row[indices["rrp"]] if indices["rrp"] != -1 else None
+        ean = row[indices["barcode"]] if indices["barcode"] != -1 else None
+        hs_code = row[indices["hs_code"]] if indices["hs_code"] != -1 else None
+        masterbox = row[indices["masterbox"]] if indices["masterbox"] != -1 else None
+        weight_val = row[indices["weight"]] if indices["weight"] != -1 else None
 
-        try:
-            sales_price = float(rrp) if rrp is not None else 0.0
-        except ValueError:
-            print(f"Row {row_idx} (SKU {sku}): Invalid Sales Price '{rrp}', defaulting to 0.0")
-            sales_price = 0.0
+        # Parse prices safely (only if not empty/None to prevent overwriting with 0.0)
+        cost_price = None
+        if indices["reseller_price"] != -1:
+            if reseller_price is not None and str(reseller_price).strip() not in ("", "None", "False"):
+                try:
+                    cost_price = float(reseller_price)
+                except ValueError:
+                    print(f"Row {row_idx} (SKU {sku}): Invalid Cost Price '{reseller_price}', ignoring cost update.")
 
-        # Parse weight safely
-        try:
-            weight = float(weight_val) if weight_val is not None else 0.0
-        except ValueError:
-            print(f"Row {row_idx} (SKU {sku}): Invalid Weight '{weight_val}', defaulting to 0.0")
-            weight = 0.0
+        sales_price = None
+        if indices["rrp"] != -1:
+            if rrp is not None and str(rrp).strip() not in ("", "None", "False"):
+                try:
+                    sales_price = float(rrp)
+                except ValueError:
+                    print(f"Row {row_idx} (SKU {sku}): Invalid Sales Price '{rrp}', ignoring price update.")
 
-        # Parse EAN / Barcode safely
-        barcode = str(ean).strip() if ean is not None else ""
-        if barcode.endswith(".0"):
-            barcode = barcode[:-2]
-        if barcode in ("", "None", "False"):
-            barcode = False
+        # Parse weight safely (only if not empty/None to prevent overwriting with 0.0)
+        weight = None
+        if indices["weight"] != -1:
+            if weight_val is not None and str(weight_val).strip() not in ("", "None", "False"):
+                try:
+                    weight = float(weight_val)
+                except ValueError:
+                    print(f"Row {row_idx} (SKU {sku}): Invalid Weight '{weight_val}', ignoring weight update.")
+
+        # Parse EAN / Barcode safely with type filtering (ignores ASINs)
+        barcode = None
+        if indices["barcode"] != -1:
+            raw_barcode = row[indices["barcode"]]
+            if raw_barcode is not None:
+                barcode_str = str(raw_barcode).strip()
+                if barcode_str.endswith(".0"):
+                    barcode_str = barcode_str[:-2]
+                
+                is_valid_type = True
+                if indices["barcode_type"] != -1:
+                    raw_type = row[indices["barcode_type"]]
+                    if raw_type is not None:
+                        b_type = str(raw_type).strip().upper()
+                        # Only accept standard barcode ID types (EAN, UPC, GTIN, ISBN)
+                        if b_type not in ["EAN", "UPC", "GTIN", "ISBN"]:
+                            is_valid_type = False
+                
+                if is_valid_type and barcode_str not in ("", "None", "False"):
+                    barcode = barcode_str
 
         # Parse HS Code safely
-        hs_code_str = str(hs_code).strip() if hs_code is not None else ""
-        if hs_code_str.endswith(".0"):
-            hs_code_str = hs_code_str[:-2]
-        if hs_code_str in ("", "None", "False"):
-            hs_code_str = False
+        hs_code_str = None
+        if indices["hs_code"] != -1:
+            if hs_code is not None:
+                h_str = str(hs_code).strip()
+                if h_str.endswith(".0"):
+                    h_str = h_str[:-2]
+                if h_str not in ("", "None", "False"):
+                    hs_code_str = h_str
 
         try:
             # Check Odoo for existing product by default_code (SKU)
@@ -231,19 +273,25 @@ def main():
                 [domain], {"fields": fields, "limit": 1}
             )
 
-            # Target fields mapping
+            # Target fields mapping (built dynamically based on present columns with values)
             vals = {
-                "name": name,
+                "name": name_val,
                 "default_code": sku,
-                "description_sale": description,
-                "list_price": sales_price,
-                "standard_price": cost_price,
-                "barcode": barcode,
-                "hs_code": hs_code_str,
                 "type": "consu",
                 "is_storable": True,
-                "weight": weight,
             }
+            if description_val is not None:
+                vals["description_sale"] = description_val
+            if sales_price is not None:
+                vals["list_price"] = sales_price
+            if cost_price is not None:
+                vals["standard_price"] = cost_price
+            if barcode is not None:
+                vals["barcode"] = barcode
+            if hs_code_str is not None:
+                vals["hs_code"] = hs_code_str
+            if weight is not None:
+                vals["weight"] = weight
             if categ_id:
                 vals["categ_id"] = categ_id
 
@@ -300,7 +348,7 @@ def main():
                     print(f"[DRY-RUN] Would create product SKU {sku}: {vals}")
                 else:
                     new_tmpl_id = models.execute_kw(db, uid, password, "product.template", "create", [vals])
-                    print(f"Created product SKU {sku} (ID: {new_tmpl_id}): {name} - Sale Price: {sales_price}, Cost Price: {cost_price}, Weight: {weight}")
+                    print(f"Created product SKU {sku} (ID: {new_tmpl_id}): {name_val} - Sale Price: {sales_price}, Cost Price: {cost_price}, Weight: {weight}")
                     
                     # Create packaging if masterbox is specified
                     if masterbox is not None:
