@@ -16,4 +16,5 @@ When performing work in this repository, you must adhere to the following Git br
    - Once all work is completed and successfully verified, merge your working branch back into the `main` branch.
    - Provide a concise title and description of your changes in the merge/commit message.
    - If the merge is successful, delete the working branch.
+   - Run `pip freeze > requirements.txt` (or UV equivalent) to keep dependencies up-to-date, and commit any changes.
    - Finally, push the updated `main` branch to the remote repository.
